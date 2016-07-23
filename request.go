@@ -1,7 +1,6 @@
 package tarantool
 
 import (
-	"errors"
 	"fmt"
 	"gopkg.in/vmihailenco/msgpack.v2"
 	"time"
@@ -66,17 +65,6 @@ func (conn *Connection) Select(space, index interface{}, offset, limit, iterator
 	return
 }
 
-func (conn *Connection) SelectTyped(space, index interface{}, offset, limit, iterator uint32, key []interface{}, result interface{}) (err error) {
-	request := conn.NewRequest(SelectRequest)
-	spaceNo, indexNo, err := conn.Schema.resolveSpaceIndex(space, index)
-	if err != nil {
-		return
-	}
-	request.fillSearch(spaceNo, indexNo, key)
-	request.fillIterator(offset, limit, iterator)
-	return request.performTyped(result)
-}
-
 func (conn *Connection) Insert(space interface{}, tuple interface{}) (resp *Response, err error) {
 	request := conn.NewRequest(InsertRequest)
 	spaceNo, _, err := conn.Schema.resolveSpaceIndex(space, nil)
@@ -122,17 +110,6 @@ func (conn *Connection) Update(space, index interface{}, key, ops []interface{})
 	return
 }
 
-func (conn *Connection) UpdateTyped(space, index interface{}, key, ops []interface{}, result interface{}) (err error) {
-	request := conn.NewRequest(UpdateRequest)
-	spaceNo, indexNo, err := conn.Schema.resolveSpaceIndex(space, index)
-	if err != nil {
-		return
-	}
-	request.fillSearch(spaceNo, indexNo, key)
-	request.body[KeyTuple] = ops
-	return request.performTyped(result)
-}
-
 func (conn *Connection) Upsert(space interface{}, tuple, ops []interface{}) (resp *Response, err error) {
 	request := conn.NewRequest(UpsertRequest)
 	spaceNo, _, err := conn.Schema.resolveSpaceIndex(space, nil)
@@ -154,13 +131,6 @@ func (conn *Connection) Call(functionName string, args []interface{}) (resp *Res
 	return
 }
 
-func (conn *Connection) CallTyped(functionName string, args []interface{}, result interface{}) (err error) {
-	request := conn.NewRequest(CallRequest)
-	request.body[KeyFunctionName] = functionName
-	request.body[KeyTuple] = args
-	return request.performTyped(result)
-}
-
 func (conn *Connection) Eval(expr string, args []interface{}) (resp *Response, err error) {
 	request := conn.NewRequest(EvalRequest)
 	request.body[KeyExpression] = expr
@@ -169,6 +139,86 @@ func (conn *Connection) Eval(expr string, args []interface{}) (resp *Response, e
 	return
 }
 
+// Typed methods
+func (conn *Connection) SelectTyped(space, index interface{}, offset, limit, iterator uint32, key []interface{}, result interface{}) (err error) {
+	request := conn.NewRequest(SelectRequest)
+	spaceNo, indexNo, err := conn.Schema.resolveSpaceIndex(space, index)
+	if err != nil {
+		return
+	}
+	request.fillSearch(spaceNo, indexNo, key)
+	request.fillIterator(offset, limit, iterator)
+	return request.performTyped(result)
+}
+
+func (conn *Connection) InsertTyped(space interface{}, tuple interface{}, result interface{}) (err error) {
+	request := conn.NewRequest(InsertRequest)
+	spaceNo, _, err := conn.Schema.resolveSpaceIndex(space, nil)
+	if err != nil {
+		return
+	}
+	request.fillInsert(spaceNo, tuple)
+	return request.performTyped(result)
+}
+
+func (conn *Connection) ReplaceTyped(space interface{}, tuple interface{}, result interface{}) (err error) {
+	request := conn.NewRequest(ReplaceRequest)
+	spaceNo, _, err := conn.Schema.resolveSpaceIndex(space, nil)
+	if err != nil {
+		return
+	}
+	request.fillInsert(spaceNo, tuple)
+	return request.performTyped(result)
+}
+
+func (conn *Connection) DeleteTyped(space, index interface{}, key []interface{}, result interface{}) (err error) {
+	request := conn.NewRequest(DeleteRequest)
+	spaceNo, indexNo, err := conn.Schema.resolveSpaceIndex(space, index)
+	if err != nil {
+		return
+	}
+	request.fillSearch(spaceNo, indexNo, key)
+	return request.performTyped(result)
+}
+
+func (conn *Connection) UpdateTyped(space, index interface{}, key, ops []interface{}, result interface{}) (err error) {
+	request := conn.NewRequest(UpdateRequest)
+	spaceNo, indexNo, err := conn.Schema.resolveSpaceIndex(space, index)
+	if err != nil {
+		return
+	}
+	request.fillSearch(spaceNo, indexNo, key)
+	request.body[KeyTuple] = ops
+	return request.performTyped(result)
+}
+
+func (conn *Connection) UpsertTyped(space interface{}, tuple, ops []interface{}, result interface{}) (err error) {
+	request := conn.NewRequest(UpsertRequest)
+	spaceNo, _, err := conn.Schema.resolveSpaceIndex(space, nil)
+	if err != nil {
+		return
+	}
+	request.body[KeySpaceNo] = spaceNo
+	request.body[KeyTuple] = tuple
+	request.body[KeyDefTuple] = ops
+	return request.performTyped(result)
+}
+
+func (conn *Connection) CallTyped(functionName string, args []interface{}, result interface{}) (err error) {
+	request := conn.NewRequest(CallRequest)
+	request.body[KeyFunctionName] = functionName
+	request.body[KeyTuple] = args
+	return request.performTyped(result)
+}
+
+func (conn *Connection) EvalTyped(expr string, args []interface{}, result interface{}) (err error) {
+	request := conn.NewRequest(EvalRequest)
+	request.body[KeyExpression] = expr
+	request.body[KeyTuple] = args
+	return request.performTyped(result)
+}
+
+// Async methods
 func (conn *Connection) SelectAsync(space, index interface{}, offset, limit, iterator uint32, key []interface{}) *Future {
 	request := conn.NewRequest(SelectRequest)
 	spaceNo, indexNo, err := conn.Schema.resolveSpaceIndex(space, index)
@@ -305,8 +355,12 @@ func (req *Request) future() (fut *Future) {
 	fut = &Future{req: req}
 
 	// check connection ready to process packets
+	if closed := req.conn.closed; closed {
+		fut.err = ClientError{ErrConnectionClosed, "using closed connection"}
+		return
+	}
 	if c := req.conn.c; c == nil {
-		fut.err = errors.New("client connection is not ready")
+		fut.err = ClientError{ErrConnectionNotReady, "client connection is not ready"}
 		return
 	}
 
@@ -318,7 +372,7 @@ func (req *Request) future() (fut *Future) {
 	req.conn.mutex.Lock()
 	if req.conn.closed {
 		req.conn.mutex.Unlock()
-		fut.err = errors.New("using closed connection")
+		fut.err = ClientError{ErrConnectionClosed, "using closed connection"}
 		return
 	}
 	req.conn.requests[req.requestId] = fut
